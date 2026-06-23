@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🚀 太空生存战</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: monospace; }
+  canvas { border: 1px solid #1a1a3a; border-radius: 8px; box-shadow: 0 0 40px rgba(0,212,255,0.2); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Responsive size
+const W = Math.min(window.innerWidth - 20, 800);
+const H = Math.min(window.innerHeight - 20, 600);
+canvas.width = W;
+canvas.height = H;
+
+// ── State ──
+let state = 'start'; // start, playing, over
+let score = 0;
+let highScore = parseInt(localStorage.getItem('space_shooter_hs') || '0');
+let frame = 0;
+
+// ── Ship ──
+const ship = { x: W * 0.15, y: H / 2, r: 16, vy: 0, hp: 3, invincible: 0, dead: false };
+
+// ── Entities ──
+let bullets = [];
+let enemies = [];
+let stars = [];
+let explosions = [];
+let powerups = [];
+let particles = [];
+
+// ── Input ──
+let keys = {};
+let touching = false;
+let touchY = ship.y;
+
+document.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
+document.addEventListener('keyup', e => keys[e.code] = false);
+canvas.addEventListener('touchstart', e => { touching = true; touchY = e.touches[0].clientY - canvas.getBoundingClientRect().top; e.preventDefault(); }, { passive: false });
+canvas.addEventListener('touchmove', e => { touchY = e.touches[0].clientY - canvas.getBoundingClientRect().top; e.preventDefault(); }, { passive: false });
+canvas.addEventListener('touchend', () => touching = false);
+canvas.addEventListener('mousedown', e => { touching = true; touchY = e.offsetY; });
+canvas.addEventListener('mouseup', () => touching = false);
+
+// ── Stars ──
+function initStars() {
+  stars = [];
+  for (let i = 0; i < 120; i++) {
+    stars.push({
+      x: Math.random() * W, y: Math.random() * H,
+      r: Math.random() * 2 + 0.5,
+      speed: Math.random() * 2 + 0.5,
+      alpha: Math.random() * 0.8 + 0.2,
+      twinkle: Math.random() * Math.PI * 2
+    });
+  }
+}
+initStars();
+
+// ── Utils ──
+function circleCollide(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx*dx + dy*dy) < (a.r||4) + (b.r||4);
+}
+
+function spawnEnemy() {
+  const type = Math.random();
+  if (type < 0.5) {
+    // Normal asteroid
+    enemies.push({ x: W + 25, y: Math.random() * (H - 60) + 30, r: 18 + Math.random() * 16, vx: -(2 + Math.random() * 2), vy: (Math.random() - 0.5) * 1.5, rot: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.05, type: 'asteroid', hp: 1 });
+  } else if (type < 0.8) {
+    // Fast small
+    enemies.push({ x: W + 15, y: Math.random() * (H - 60) + 30, r: 12, vx: -(4 + Math.random() * 2), vy: (Math.random() - 0.5) * 2, rot: 0, rotSpeed: 0, type: 'asteroid', hp: 1, fast: true });
+  } else {
+    // UFO
+    enemies.push({ x: W + 20, y: Math.random() * (H - 60) + 30, r: 20, vx: -(1.5 + Math.random()), vy: 0, rot: 0, rotSpeed: 0, type: 'ufo', hp: 2, shootTimer: 0 });
+  }
+}
+
+function spawnPowerup() {
+  powerups.push({ x: W + 10, y: Math.random() * (H - 80) + 40, r: 12, vx: -2, type: Math.random() < 0.7 ? 'hp' : 'bomb', timer: 0 });
+}
+
+function explode(x, y, color, count = 15) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 4 + 1;
+    particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1, decay: 0.02 + Math.random() * 0.03, r: Math.random() * 4 + 1, color });
+  }
+}
+
+function boom(x, y) {
+  explosions.push({ x, y, r: 5, maxR: 60, alpha: 1 });
+  for (let i = 0; i < 30; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 8 + 2;
+    particles.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 1, decay: 0.015 + Math.random() * 0.02, r: Math.random() * 6 + 2, color: `hsl(${Math.random() * 60 + 30}, 100%, 60%)` });
+  }
+}
+
+function resetGame() {
+  ship.y = H / 2; ship.vy = 0; ship.hp = 3; ship.invincible = 0; ship.dead = false;
+  bullets = []; enemies = []; explosions = []; powerups = []; particles = [];
+  score = 0; frame = 0;
+}
+
+// ── Draw ──
+function drawStars() {
+  stars.forEach(s => {
+    s.twinkle += 0.02;
+    const a = s.alpha * (0.5 + 0.5 * Math.sin(s.twinkle));
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${a})`;
+    ctx.fill();
+  });
+}
+
+function drawShip(x, y, r, invincible) {
+  if (invincible > 0 && Math.floor(frame / 4) % 2 === 0) return; // blink
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Engine flame
+  const flameLen = 12 + Math.random() * 8;
+  const grad = ctx.createLinearGradient(-r, 0, -r - flameLen, 0);
+  grad.addColorStop(0, 'rgba(255,150,0,0.9)');
+  grad.addColorStop(0.5, 'rgba(255,80,0,0.6)');
+  grad.addColorStop(1, 'rgba(255,50,0,0)');
+  ctx.beginPath();
+  ctx.moveTo(-r, -5);
+  ctx.lineTo(-r - flameLen, 0);
+  ctx.lineTo(-r, 5);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Body
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.lineTo(-r * 0.7, -r * 0.7);
+  ctx.lineTo(-r * 0.3, 0);
+  ctx.lineTo(-r * 0.7, r * 0.7);
+  ctx.closePath();
+
+  const bodyGrad = ctx.createLinearGradient(-r, -r, r, r);
+  bodyGrad.addColorStop(0, '#00d4ff');
+  bodyGrad.addColorStop(1, '#0066aa');
+  ctx.fillStyle = bodyGrad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,212,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Cockpit
+  ctx.beginPath();
+  ctx.arc(r * 0.2, 0, r * 0.25, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(180,230,255,0.8)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawAsteroid(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.rot);
+  ctx.beginPath();
+  const spikes = 8;
+  for (let i = 0; i < spikes * 2; i++) {
+    const angle = (i / (spikes * 2)) * Math.PI * 2;
+    const r2 = i % 2 === 0 ? e.r : e.r * (0.7 + (i * 17 % 5) * 0.06);
+    if (i === 0) ctx.moveTo(Math.cos(angle) * r2, Math.sin(angle) * r2);
+    else ctx.lineTo(Math.cos(angle) * r2, Math.sin(angle) * r2);
+  }
+  ctx.closePath();
+  const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, e.r);
+  grad.addColorStop(0, e.fast ? '#884400' : '#555');
+  grad.addColorStop(1, e.fast ? '#331100' : '#222');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = e.fast ? '#ff6600' : '#666';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawUFO(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  // Dome
+  ctx.beginPath();
+  ctx.arc(0, -6, 10, Math.PI, 0);
+  ctx.fillStyle = '#aaaaff';
+  ctx.fill();
+  // Body
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 20, 8, 0, 0, Math.PI * 2);
+  const grad = ctx.createLinearGradient(-20, 0, 20, 0);
+  grad.addColorStop(0, '#333');
+  grad.addColorStop(0.5, '#888');
+  grad.addColorStop(1, '#333');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  // Glow
+  ctx.beginPath();
+  ctx.ellipse(0, 6, 12, 4, 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(168,85,247,${0.5 + 0.5 * Math.sin(frame * 0.1)})`;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBullet(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 6);
+  grad.addColorStop(0, '#fff');
+  grad.addColorStop(0.3, '#00d4ff');
+  grad.addColorStop(1, 'rgba(0,212,255,0)');
+  ctx.beginPath();
+  ctx.arc(0, 0, 6, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPowerup(p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  const glow = 0.7 + 0.3 * Math.sin(frame * 0.1);
+  ctx.beginPath();
+  ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+  if (p.type === 'hp') {
+    ctx.fillStyle = `rgba(16,185,129,${glow})`;
+    ctx.strokeStyle = '#10b981';
+  } else {
+    ctx.fillStyle = `rgba(245,158,11,${glow})`;
+    ctx.strokeStyle = '#f59e0b';
+  }
+  ctx.lineWidth = 2;
+  ctx.fill();
+  ctx.stroke();
+  // Icon
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${p.r * 1.2}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(p.type === 'hp' ? '+' : '💥', 0, 1);
+  ctx.restore();
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawExplosions() {
+  explosions.forEach(e => {
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,150,50,${e.alpha})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.r * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,200,${e.alpha * 0.5})`;
+    ctx.fill();
+  });
+}
+
+function drawHUD() {
+  // HP
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = i < ship.hp ? '#10b981' : '#333';
+    ctx.font = '20px monospace';
+    ctx.fillText('❤️', 10 + i * 28, 30);
+  }
+  // Score
+  ctx.fillStyle = '#00d4ff';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`分数: ${score}`, W - 10, 30);
+  ctx.fillStyle = '#f59e0b';
+  ctx.font = '13px monospace';
+  ctx.fillText(`最高: ${highScore}`, W - 10, 50);
+  ctx.textAlign = 'left';
+}
+
+function drawStart() {
+  // Title
+  ctx.textAlign = 'center';
+  ctx.font = `bold ${Math.min(56, W * 0.07)}px monospace`;
+  ctx.fillStyle = '#00d4ff';
+  ctx.fillText('🚀', W / 2, H * 0.3);
+  ctx.font = `bold ${Math.min(42, W * 0.06)}px monospace`;
+  const grad = ctx.createLinearGradient(W * 0.2, 0, W * 0.8, 0);
+  grad.addColorStop(0, '#00d4ff');
+  grad.addColorStop(1, '#a855f7');
+  ctx.fillStyle = grad;
+  ctx.fillText('太空生存战', W / 2, H * 0.3 + 56);
+
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#888';
+  ctx.fillText('← → 或 ↑ ↓ 控制飞船，空格/W/点击 发射', W / 2, H * 0.55);
+  ctx.fillText('躲避陨石 · 击毁敌人 · 收集能量', W / 2, H * 0.55 + 24);
+
+  ctx.fillStyle = '#f59e0b';
+  ctx.font = '14px monospace';
+  ctx.fillText(`最高分: ${highScore}`, W / 2, H * 0.65);
+
+  // Blink prompt
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px monospace';
+    ctx.fillText('▶ 按任意键开始', W / 2, H * 0.75);
+  }
+
+  ctx.textAlign = 'left';
+}
+
+function drawOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.font = `bold ${Math.min(48, W * 0.07)}px monospace`;
+  ctx.fillStyle = '#ef4444';
+  ctx.fillText('💥 飞船坠毁', W / 2, H * 0.35);
+
+  ctx.font = 'bold 32px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`最终分数: ${score}`, W / 2, H * 0.48);
+
+  if (score >= highScore && score > 0) {
+    ctx.font = '18px monospace';
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillText('🏆 新纪录！', W / 2, H * 0.55);
+  }
+
+  ctx.fillStyle = '#888';
+  ctx.font = '14px monospace';
+  ctx.fillText(`最高分: ${highScore}`, W / 2, H * 0.62);
+
+  if (Math.floor(frame / 30) % 2 === 0) {
+    ctx.fillStyle = '#00d4ff';
+    ctx.font = 'bold 20px monospace';
+    ctx.fillText('▶ 按任意键重新开始', W / 2, H * 0.75);
+  }
+
+  ctx.textAlign = 'left';
+}
+
+// ── Update ──
+function update() {
+  frame++;
+
+  // Stars scroll
+  stars.forEach(s => {
+    s.x -= s.speed;
+    if (s.x < 0) { s.x = W; s.y = Math.random() * H; }
+  });
+
+  if (state !== 'playing') return;
+
+  // Ship movement
+  const accel = 0.6;
+  const maxVY = 7;
+  const friction = 0.92;
+
+  if (keys['ArrowUp'] || keys['KeyW']) ship.vy -= accel;
+  if (keys['ArrowDown'] || keys['KeyS']) ship.vy += accel;
+  if (touching) {
+    const targetVY = (touchY - ship.y) * 0.15;
+    ship.vy += (targetVY - ship.vy) * 0.2;
+  }
+  ship.vy = Math.max(-maxVY, Math.min(maxVY, ship.vy));
+  ship.vy *= friction;
+  ship.y += ship.vy;
+  ship.y = Math.max(ship.r + 2, Math.min(H - ship.r - 2, ship.y));
+
+  // Shooting
+  if ((keys['Space'] || keys['KeyZ'] || keys['Enter']) && frame % 8 === 0) {
+    bullets.push({ x: ship.x + ship.r, y: ship.y, vx: 10, r: 4 });
+  }
+
+  // Invincible timer
+  if (ship.invincible > 0) ship.invincible--;
+
+  // Spawn enemies
+  if (frame % Math.max(20, 80 - Math.floor(score / 5)) === 0) spawnEnemy();
+  if (frame % 300 === 0) spawnPowerup();
+
+  // Update bullets
+  bullets.forEach(b => b.x += b.vx);
+  bullets = bullets.filter(b => b.x < W + 20);
+
+  // Update enemies
+  enemies.forEach(e => {
+    e.x += e.vx; e.y += e.vy; e.rot += e.rotSpeed;
+    if (e.type === 'ufo') {
+      // UFO hovers
+      if (frame % 120 < 60) e.vy = 0.8;
+      else e.vy = -0.8;
+      e.y = Math.max(30, Math.min(H - 30, e.y));
+      // Shoot
+      e.shootTimer++;
+      if (e.shootTimer > 90) {
+        bullets.push({ x: e.x - e.r, y: e.y, vx: -6, r: 3, enemy: true });
+        e.shootTimer = 0;
+      }
+    }
+    // Bounce
+    if (e.y < e.r || e.y > H - e.r) e.vy *= -1;
+  });
+
+  // Update powerups
+  powerups.forEach(p => { p.x += p.vx; p.timer++; });
+  powerups = powerups.filter(p => p.x > -20);
+
+  // Bullet-enemy collision
+  bullets.forEach((b, bi) => {
+    enemies.forEach((e, ei) => {
+      if (circleCollide(b, e)) {
+        e.hp--;
+        bullets.splice(bi, 1);
+        if (e.hp <= 0) {
+          boom(e.x, e.y);
+          enemies.splice(ei, 1);
+          score += e.type === 'ufo' ? 15 : 5;
+          if (e.fast) score += 5;
+        } else {
+          explode(e.x, e.y, '#ff8800', 8);
+        }
+      }
+    });
+  });
+
+  // Ship-enemy collision
+  if (ship.invincible === 0) {
+    for (const e of enemies) {
+      if (circleCollide(ship, e)) {
+        ship.hp--;
+        ship.invincible = 90;
+        boom(ship.x, ship.y);
+        if (ship.hp <= 0) {
+          state = 'over';
+          if (score > highScore) {
+            highScore = score;
+            localStorage.setItem('space_shooter_hs', highScore);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Bullet-enemy bullet collision
+  bullets = bullets.filter(b => {
+    if (!b.enemy) return true;
+    for (const e of enemies) {
+      if (circleCollide(b, e)) return false;
+    }
+    return true;
+  });
+
+  // Powerup collision
+  powerups = powerups.filter(p => {
+    if (circleCollide(ship, p)) {
+      if (p.type === 'hp') ship.hp = Math.min(3, ship.hp + 1);
+      if (p.type === 'bomb') {
+        enemies.forEach(e => { boom(e.x, e.y); score += 5; });
+        enemies = [];
+      }
+      return false;
+    }
+    return true;
+  });
+
+  // Update particles
+  particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vx *= 0.96; p.vy *= 0.96; p.life -= p.decay; });
+  particles = particles.filter(p => p.life > 0);
+
+  // Update explosions
+  explosions.forEach(e => { e.r += 4; e.alpha -= 0.06; });
+  explosions = explosions.filter(e => e.alpha > 0);
+
+  // Remove off-screen enemies
+  enemies = enemies.filter(e => e.x > -60);
+}
+
+// ── Main Loop ──
+function loop() {
+  update();
+
+  ctx.fillStyle = '#050810';
+  ctx.fillRect(0, 0, W, H);
+
+  drawStars();
+  drawParticles();
+  drawExplosions();
+
+  if (state === 'start') {
+    drawStart();
+  } else if (state === 'playing' || state === 'over') {
+    enemies.forEach(e => {
+      if (e.type === 'ufo') drawUFO(e);
+      else drawAsteroid(e);
+    });
+    bullets.forEach(b => {
+      ctx.fillStyle = b.enemy ? '#ff4444' : '#00d4ff';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    powerups.forEach(drawPowerup);
+    drawShip(ship.x, ship.y, ship.r, ship.invincible);
+    drawHUD();
+    if (state === 'over') drawOver();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ── Input: start/restart ──
+function tryStart() {
+  if (state === 'start') { state = 'playing'; resetGame(); }
+  else if (state === 'over') { state = 'playing'; resetGame(); }
+}
+
+document.addEventListener('keydown', tryStart);
+canvas.addEventListener('click', tryStart);
+canvas.addEventListener('touchstart', tryStart, { passive: false });
+
+loop();
+</script>
+</body>
+</html>
